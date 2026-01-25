@@ -270,40 +270,58 @@ class CLI:
         """
         print("\nUpdating data sources...")
 
-        try:
-            from .fetchers import (
-                NHLAPIFetcher,
-                NaturalStatTrickScraper,
-                DailyFaceoffScraper,
-            )
+        from .fetchers import (
+            NHLAPIFetcher,
+            NaturalStatTrickScraper,
+            DailyFaceoffScraper,
+        )
 
-            # Update schedule
-            print("  Fetching NHL schedule...")
+        errors = []
+
+        # Update schedule
+        print("  Fetching NHL schedule...")
+        try:
             nhl = NHLAPIFetcher()
             nhl.fetch_schedule(date.today())
+        except Exception as e:
+            errors.append(f"NHL schedule: {e}")
+            logger.warning(f"Failed to fetch NHL schedule: {e}")
 
-            # Update stats
-            print("  Fetching team stats...")
+        # Update stats
+        print("  Fetching team stats...")
+        try:
             nst = NaturalStatTrickScraper()
             nst.fetch_team_stats()
+        except Exception as e:
+            errors.append(f"Team stats: {e}")
+            logger.warning(f"Failed to fetch team stats: {e}")
 
-            # Update goalies
-            print("  Fetching goalie info...")
+        # Update goalies
+        print("  Fetching goalie info...")
+        try:
             df = DailyFaceoffScraper()
             df.fetch_starting_goalies()
+        except Exception as e:
+            errors.append(f"Goalie info: {e}")
+            logger.warning(f"Failed to fetch goalie info: {e}")
 
-            # Update prediction outcomes
-            print("  Updating prediction outcomes...")
+        # Update prediction outcomes
+        print("  Updating prediction outcomes...")
+        try:
             updated = self.performance_tracker.update_results()
             print(f"    Updated {updated} predictions")
-
-            print("\nData update complete!")
-            return 0
-
         except Exception as e:
-            logger.error(f"Data update error: {e}")
-            print(f"\nError: {e}")
-            return 1
+            errors.append(f"Prediction outcomes: {e}")
+            logger.warning(f"Failed to update prediction outcomes: {e}")
+
+        if errors:
+            print(f"\nData update completed with {len(errors)} warning(s):")
+            for err in errors:
+                print(f"  - {err}")
+            return 0  # Still return success, just with warnings
+
+        print("\nData update complete!")
+        return 0
 
 
 def parse_date(date_str: str) -> date:
