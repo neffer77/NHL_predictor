@@ -71,6 +71,11 @@ class NSTScraper(BaseFetcher):
     def __init__(self):
         super().__init__(source_name="natural_stat_trick")
 
+    @property
+    def base_url(self) -> str:
+        """Return the base URL (for compatibility)."""
+        return self.BASE_URL
+
     def fetch(self, **kwargs) -> list[TeamAdvancedStats]:
         """Fetch team stats from NST."""
         return self.fetch_team_stats(**kwargs)

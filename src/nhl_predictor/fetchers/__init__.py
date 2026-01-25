@@ -7,6 +7,9 @@ from .moneypuck import MoneyPuckFetcher, fetch_predictions, fetch_team_stats as 
 from .daily_faceoff import DailyFaceoffScraper, fetch_starting_goalies, get_confirmed_starters
 from .scouting_refs import ScoutingRefsScraper, fetch_referee_assignments
 
+# Aliases for backward compatibility
+NaturalStatTrickScraper = NSTScraper
+
 __all__ = [
     # Base
     "BaseFetcher",
@@ -16,6 +19,7 @@ __all__ = [
     "fetch_standings",
     # Natural Stat Trick
     "NSTScraper",
+    "NaturalStatTrickScraper",
     "fetch_team_stats",
     # MoneyPuck
     "MoneyPuckFetcher",

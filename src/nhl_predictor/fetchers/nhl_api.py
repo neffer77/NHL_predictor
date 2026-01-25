@@ -64,6 +64,11 @@ class NHLAPIFetcher(BaseFetcher):
     def __init__(self):
         super().__init__(source_name="nhl_api")
 
+    @property
+    def base_url(self) -> str:
+        """Return the base URL (for compatibility)."""
+        return self.BASE_URL
+
     def fetch(self, fetch_type: str = "schedule", **kwargs) -> Any:
         """
         Fetch data from NHL API.
