@@ -139,8 +139,8 @@ class StabilityChecker:
             xgf_values = [s.xgf_pct for s in stats if s.xgf_pct]
             xgf_variance = self._calculate_variance(xgf_values) if xgf_values else 0
 
-            # Calculate scoring variance
-            scoring_values = [s.goals_for for s in stats if s.goals_for]
+            # Calculate scoring variance (using xGF as proxy since actual goals not stored)
+            scoring_values = [s.xgf for s in stats if s.xgf]
             scoring_variance = (
                 self._calculate_variance(scoring_values) if scoring_values
                 else 0
