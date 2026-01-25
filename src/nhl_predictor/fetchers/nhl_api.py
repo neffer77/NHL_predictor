@@ -273,14 +273,27 @@ class NHLAPIFetcher(BaseFetcher):
             game_date = None
             start_time = None
 
-            if game_date_str:
-                game_date = datetime.strptime(game_date_str, "%Y-%m-%d").date()
-
+            # Try to parse start time first
             if start_time_str:
                 try:
                     start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                    # Extract date from start time if gameDate is not available
+                    if not game_date_str:
+                        game_date = start_time.date()
                 except ValueError:
                     pass
+
+            # Parse gameDate if available
+            if game_date_str and not game_date:
+                try:
+                    game_date = datetime.strptime(game_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            # If still no date, skip this game
+            if game_date is None:
+                logger.warning(f"Could not parse date for game {game_data.get('id')}")
+                return None
 
             # Get scores
             home_score = home_team_data.get("score")
