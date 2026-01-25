@@ -121,6 +121,8 @@ def get_db(db_path: Optional[str] = None, reset: bool = False) -> Database:
 
     if _db_instance is None or reset:
         _db_instance = Database(db_path)
+        # Auto-create tables if they don't exist
+        _db_instance.create_tables()
 
     return _db_instance
 
