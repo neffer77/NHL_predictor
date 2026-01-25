@@ -178,13 +178,14 @@ class StayAwayFilter:
                 away_goalie.confirmation_status == "confirmed"
             )
 
-            # Both unconfirmed = filter out
+            # Both unconfirmed = add high risk flag but don't filter
+            # (We still want to make picks even without goalie confirmation)
             if not home_confirmed and not away_confirmed:
-                return {
-                    "filter": True,
-                    "reason": "Both goalies unconfirmed",
-                    "flags": ["UNCONFIRMED_GOALIES"],
-                }
+                flags.append("UNCONFIRMED_GOALIES")
+                # Only filter if we have no goalie data at all
+                if not home_goalie and not away_goalie:
+                    # Still allow but flag as high risk
+                    flags.append("NO_GOALIE_DATA")
 
             # One unconfirmed = add flag but don't filter
             if not home_confirmed:

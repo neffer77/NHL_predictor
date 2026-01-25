@@ -370,20 +370,43 @@ def normalize_team_name(raw_name: str) -> str:
     raise ValueError(f"Cannot resolve team name: '{raw_name}'")
 
 
-def normalize_team_name_safe(raw_name: str) -> Optional[str]:
+def normalize_team_name_safe(raw_name: str, log_warning: bool = True) -> Optional[str]:
     """
     Safely normalize a team name, returning None if not found.
 
     Args:
         raw_name: Team name in any format.
+        log_warning: Whether to log a warning for unrecognized names.
 
     Returns:
         Standard 3-letter team code, or None if not found.
     """
-    try:
-        return normalize_team_name(raw_name)
-    except ValueError:
+    if not raw_name:
         return None
+
+    # Clean input
+    cleaned = raw_name.strip()
+
+    # Direct lookup
+    if cleaned in TEAM_MAPPING:
+        return TEAM_MAPPING[cleaned]
+
+    # Try case-insensitive lookup
+    for key, code in TEAM_MAPPING.items():
+        if key.lower() == cleaned.lower():
+            return code
+
+    # Try partial match (for cases like "MTL Canadiens")
+    for key, code in TEAM_MAPPING.items():
+        if key.lower() in cleaned.lower() or cleaned.lower() in key.lower():
+            logger.debug(f"Partial match: '{raw_name}' -> '{code}'")
+            return code
+
+    # Log warning for unrecognized team (if enabled)
+    if log_warning:
+        logger.warning(f"Unrecognized team name: '{raw_name}'")
+
+    return None
 
 
 def get_team_full_name(team_code: str) -> str:

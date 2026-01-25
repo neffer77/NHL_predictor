@@ -262,19 +262,57 @@ class DailyFaceoffScraper(BaseFetcher):
             if len(cells) < 2:
                 return None
 
+            # Patterns to skip (stat labels and values)
+            skip_patterns = [
+                r"^W-L-OTL:?$",
+                r"^GAA:?$",
+                r"^SV%:?$",
+                r"^SO:?$",
+                r"^\d+-\d+-\d+$",  # Record pattern
+                r"^\d+\.\d+$",     # Decimal numbers (GAA, SV%)
+                r"^\d+$",          # Single numbers
+                r"^0\.\d+$",       # Save percentage
+            ]
+
             # Try to extract team and goalie name from cells
             team_code = None
             goalie_name = None
+            record = None
+            gaa = None
+            save_pct = None
 
             for cell in cells:
                 text = cell.get_text(strip=True)
 
-                # Check if it's a team name
-                if not team_code:
-                    team_code = normalize_team_name_safe(text)
+                # Skip empty text
+                if not text:
+                    continue
 
-                # Check if it looks like a player name
-                if not goalie_name and re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+", text):
+                # Check if it matches skip patterns
+                should_skip = False
+                for pattern in skip_patterns:
+                    if re.match(pattern, text, re.I):
+                        should_skip = True
+                        # But extract stats from these values
+                        if re.match(r"^\d+-\d+-\d+$", text):
+                            record = text
+                        elif re.match(r"^\d+\.\d+$", text):
+                            val = float(text)
+                            if val < 1:  # Likely save percentage
+                                save_pct = val
+                            elif val < 5:  # Likely GAA
+                                gaa = val
+                        break
+
+                if should_skip:
+                    continue
+
+                # Check if it's a team name (only for longer text that looks like team name)
+                if not team_code and len(text) >= 3:
+                    team_code = normalize_team_name_safe(text, log_warning=False)
+
+                # Check if it looks like a player name (First Last or First M. Last)
+                if not goalie_name and re.match(r"^[A-Z][a-z]+\.?\s+[A-Z][a-z'-]+", text):
                     goalie_name = text
 
             if not team_code or not goalie_name:
@@ -294,9 +332,9 @@ class DailyFaceoffScraper(BaseFetcher):
                 opponent="",
                 confirmation_status=status,
                 game_time=None,
-                record=None,
-                gaa=None,
-                save_pct=None,
+                record=record,
+                gaa=gaa,
+                save_pct=save_pct,
             )
 
         except Exception as e:
