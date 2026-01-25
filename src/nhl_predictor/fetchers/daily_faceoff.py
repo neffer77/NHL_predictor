@@ -12,7 +12,7 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from .base import BaseFetcher
-from ..utils.team_mapping import normalize_team_name_safe
+from ..utils.team_mapping import normalize_team_name_safe, TEAM_FULL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +44,16 @@ class DailyFaceoffScraper(BaseFetcher):
         super().__init__(source_name="daily_faceoff")
         # Update headers for this site
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
         })
+
+    @property
+    def base_url(self) -> str:
+        """Return the base URL (for compatibility)."""
+        return self.BASE_URL
 
     def fetch(self, **kwargs) -> list[GoalieStart]:
         """Fetch starting goalies."""
@@ -107,224 +114,162 @@ class DailyFaceoffScraper(BaseFetcher):
         goalies = []
         soup = BeautifulSoup(html, "lxml")
 
-        # Find all goalie cards/entries
-        # Daily Faceoff structure varies, try multiple selectors
-        goalie_cards = soup.select(".starting-goalies-card, .goalie-card, .matchup-card")
+        # Try multiple parsing strategies
 
-        if not goalie_cards:
-            # Try alternative structure
-            goalie_cards = soup.select("[class*='goalie'], [class*='starter']")
+        # Strategy 1: Look for matchup containers with team logos/names
+        matchups = soup.select(".starting-goalies-matchup, .matchup, [class*='matchup']")
+        if matchups:
+            for matchup in matchups:
+                parsed = self._parse_matchup_container(matchup)
+                goalies.extend(parsed)
+            if goalies:
+                return goalies
 
-        if not goalie_cards:
-            # Fall back to table structure
+        # Strategy 2: Look for individual goalie cards
+        goalie_cards = soup.select(".goalie-card, .starter-card, [class*='goalie']")
+        if goalie_cards:
+            for card in goalie_cards:
+                goalie = self._parse_goalie_card(card)
+                if goalie:
+                    goalies.append(goalie)
+            if goalies:
+                return goalies
+
+        # Strategy 3: Parse from divs that contain team images and player links
+        # Daily Faceoff often has team logos as images with alt text
+        team_sections = soup.find_all("div", recursive=True)
+        current_team = None
+
+        for div in team_sections:
+            # Look for team logo images
+            img = div.find("img", alt=True)
+            if img:
+                alt_text = img.get("alt", "")
+                team_code = normalize_team_name_safe(alt_text, log_warning=False)
+                if team_code:
+                    current_team = team_code
+
+            # Look for player name links near team
+            if current_team:
+                links = div.find_all("a", href=lambda x: x and "players" in x)
+                for link in links:
+                    name = link.get_text(strip=True)
+                    if self._looks_like_goalie_name(name):
+                        # Check confirmation status
+                        status = self._determine_status_from_context(div)
+
+                        goalie = GoalieStart(
+                            team=current_team,
+                            goalie_name=name,
+                            opponent="",
+                            confirmation_status=status,
+                            game_time=None,
+                            record=None,
+                            gaa=None,
+                            save_pct=None,
+                        )
+
+                        # Avoid duplicates
+                        if not any(g.team == current_team and g.goalie_name == name for g in goalies):
+                            goalies.append(goalie)
+                            logger.debug(f"Found goalie: {name} for {current_team} ({status})")
+
+        # Strategy 4: Table-based parsing
+        if not goalies:
             tables = soup.find_all("table")
             for table in tables:
-                rows = table.find_all("tr")
-                for row in rows:
-                    goalie = self._parse_table_row(row)
-                    if goalie:
-                        goalies.append(goalie)
-            return goalies
+                table_goalies = self._parse_goalie_table(table)
+                goalies.extend(table_goalies)
 
-        # Parse card-based structure
-        for card in goalie_cards:
-            goalie = self._parse_goalie_card(card)
-            if goalie:
-                goalies.append(goalie)
+        return goalies
+
+    def _parse_matchup_container(self, container) -> list[GoalieStart]:
+        """Parse a matchup container that contains two teams."""
+        goalies = []
+
+        # Look for team sections within the matchup
+        teams_found = []
+
+        # Find all images (usually team logos)
+        images = container.find_all("img", alt=True)
+        for img in images:
+            alt = img.get("alt", "")
+            team_code = normalize_team_name_safe(alt, log_warning=False)
+            if team_code and team_code not in teams_found:
+                teams_found.append(team_code)
+
+        # Find all player links
+        player_links = container.find_all("a", href=lambda x: x and "player" in str(x).lower())
+
+        for i, team in enumerate(teams_found[:2]):  # Max 2 teams per matchup
+            # Try to find corresponding goalie
+            if i < len(player_links):
+                name = player_links[i].get_text(strip=True)
+                if self._looks_like_goalie_name(name):
+                    status = self._determine_status_from_context(container)
+                    goalies.append(GoalieStart(
+                        team=team,
+                        goalie_name=name,
+                        opponent=teams_found[1-i] if len(teams_found) > 1 else "",
+                        confirmation_status=status,
+                        game_time=None,
+                        record=None,
+                        gaa=None,
+                        save_pct=None,
+                    ))
 
         return goalies
 
     def _parse_goalie_card(self, card) -> Optional[GoalieStart]:
         """Parse a goalie card element."""
         try:
-            # Extract team name
-            team_elem = card.select_one(
-                ".team-name, .team, [class*='team'], img[alt]"
-            )
-            team_name = ""
-            if team_elem:
-                if team_elem.name == "img":
-                    team_name = team_elem.get("alt", "")
-                else:
-                    team_name = team_elem.get_text(strip=True)
+            # Extract team from image alt or class
+            team_code = None
 
-            team_code = normalize_team_name_safe(team_name)
+            # Try image alt text
+            img = card.find("img", alt=True)
+            if img:
+                team_code = normalize_team_name_safe(img.get("alt", ""), log_warning=False)
+
+            # Try class names containing team abbreviations
             if not team_code:
-                # Try to extract from parent or other elements
-                for elem in card.select("[class*='team']"):
-                    text = elem.get_text(strip=True)
-                    team_code = normalize_team_name_safe(text)
+                classes = " ".join(card.get("class", []))
+                for code in TEAM_FULL_NAMES.keys():
+                    if code.lower() in classes.lower():
+                        team_code = code
+                        break
+
+            # Try text content
+            if not team_code:
+                for text in card.stripped_strings:
+                    team_code = normalize_team_name_safe(text, log_warning=False)
                     if team_code:
                         break
 
             if not team_code:
                 return None
 
-            # Extract goalie name
-            goalie_elem = card.select_one(
-                ".goalie-name, .player-name, [class*='player'], a[href*='player']"
-            )
-            goalie_name = ""
-            if goalie_elem:
-                goalie_name = goalie_elem.get_text(strip=True)
+            # Extract goalie name from player link
+            goalie_name = None
+            player_link = card.find("a", href=lambda x: x and "player" in str(x).lower())
+            if player_link:
+                goalie_name = player_link.get_text(strip=True)
 
+            # Try finding name from text that looks like a name
             if not goalie_name:
-                # Try to find any name-like element
-                for elem in card.find_all(["a", "span", "div"]):
-                    text = elem.get_text(strip=True)
-                    # Look for name pattern (First Last)
-                    if re.match(r"^[A-Z][a-z]+ [A-Z][a-z]+", text):
+                for text in card.stripped_strings:
+                    if self._looks_like_goalie_name(text):
                         goalie_name = text
                         break
 
             if not goalie_name:
                 return None
 
-            # Extract confirmation status
-            status = "unconfirmed"
-            status_elem = card.select_one(
-                ".status, .confirmation, [class*='confirm'], [class*='status']"
-            )
-            if status_elem:
-                status_text = status_elem.get_text(strip=True).lower()
-                if "confirmed" in status_text or "✓" in status_text:
-                    status = "confirmed"
-                elif "expected" in status_text or "likely" in status_text:
-                    status = "expected"
+            # Determine confirmation status
+            status = self._determine_status_from_context(card)
 
-            # Also check for CSS classes indicating status
-            card_classes = " ".join(card.get("class", []))
-            if "confirmed" in card_classes.lower():
-                status = "confirmed"
-            elif "expected" in card_classes.lower():
-                status = "expected"
-
-            # Extract opponent
-            opponent = ""
-            opp_elem = card.select_one(
-                ".opponent, .vs, [class*='opponent'], [class*='versus']"
-            )
-            if opp_elem:
-                opp_text = opp_elem.get_text(strip=True)
-                # Remove "vs" or "@" prefixes
-                opp_text = re.sub(r"^(vs\.?|@)\s*", "", opp_text, flags=re.I)
-                opponent = normalize_team_name_safe(opp_text) or ""
-
-            # Extract stats if available
-            record = None
-            gaa = None
-            save_pct = None
-
-            stats_elem = card.select_one(".stats, .record, [class*='stats']")
-            if stats_elem:
-                stats_text = stats_elem.get_text(strip=True)
-
-                # Look for record pattern (W-L-OTL)
-                record_match = re.search(r"(\d+-\d+-\d+)", stats_text)
-                if record_match:
-                    record = record_match.group(1)
-
-                # Look for GAA
-                gaa_match = re.search(r"(\d+\.\d+)\s*GAA", stats_text, re.I)
-                if gaa_match:
-                    gaa = float(gaa_match.group(1))
-
-                # Look for SV%
-                sv_match = re.search(r"\.(\d{3})\s*SV%?", stats_text, re.I)
-                if sv_match:
-                    save_pct = float(f"0.{sv_match.group(1)}")
-
-            # Extract game time if available
-            game_time = None
-            time_elem = card.select_one(".time, .game-time, [class*='time']")
-            if time_elem:
-                game_time = time_elem.get_text(strip=True)
-
-            return GoalieStart(
-                team=team_code,
-                goalie_name=goalie_name,
-                opponent=opponent,
-                confirmation_status=status,
-                game_time=game_time,
-                record=record,
-                gaa=gaa,
-                save_pct=save_pct,
-            )
-
-        except Exception as e:
-            logger.debug(f"Failed to parse goalie card: {e}")
-            return None
-
-    def _parse_table_row(self, row) -> Optional[GoalieStart]:
-        """Parse a table row for goalie information."""
-        try:
-            cells = row.find_all(["td", "th"])
-            if len(cells) < 2:
-                return None
-
-            # Patterns to skip (stat labels and values)
-            skip_patterns = [
-                r"^W-L-OTL:?$",
-                r"^GAA:?$",
-                r"^SV%:?$",
-                r"^SO:?$",
-                r"^\d+-\d+-\d+$",  # Record pattern
-                r"^\d+\.\d+$",     # Decimal numbers (GAA, SV%)
-                r"^\d+$",          # Single numbers
-                r"^0\.\d+$",       # Save percentage
-            ]
-
-            # Try to extract team and goalie name from cells
-            team_code = None
-            goalie_name = None
-            record = None
-            gaa = None
-            save_pct = None
-
-            for cell in cells:
-                text = cell.get_text(strip=True)
-
-                # Skip empty text
-                if not text:
-                    continue
-
-                # Check if it matches skip patterns
-                should_skip = False
-                for pattern in skip_patterns:
-                    if re.match(pattern, text, re.I):
-                        should_skip = True
-                        # But extract stats from these values
-                        if re.match(r"^\d+-\d+-\d+$", text):
-                            record = text
-                        elif re.match(r"^\d+\.\d+$", text):
-                            val = float(text)
-                            if val < 1:  # Likely save percentage
-                                save_pct = val
-                            elif val < 5:  # Likely GAA
-                                gaa = val
-                        break
-
-                if should_skip:
-                    continue
-
-                # Check if it's a team name (only for longer text that looks like team name)
-                if not team_code and len(text) >= 3:
-                    team_code = normalize_team_name_safe(text, log_warning=False)
-
-                # Check if it looks like a player name (First Last or First M. Last)
-                if not goalie_name and re.match(r"^[A-Z][a-z]+\.?\s+[A-Z][a-z'-]+", text):
-                    goalie_name = text
-
-            if not team_code or not goalie_name:
-                return None
-
-            # Check for confirmation indicators in the row
-            row_text = row.get_text(strip=True).lower()
-            status = "unconfirmed"
-            if "confirmed" in row_text:
-                status = "confirmed"
-            elif "expected" in row_text or "likely" in row_text:
-                status = "expected"
+            # Extract stats if present
+            record, gaa, save_pct = self._extract_goalie_stats(card)
 
             return GoalieStart(
                 team=team_code,
@@ -338,8 +283,167 @@ class DailyFaceoffScraper(BaseFetcher):
             )
 
         except Exception as e:
-            logger.debug(f"Failed to parse table row: {e}")
+            logger.debug(f"Failed to parse goalie card: {e}")
             return None
+
+    def _parse_goalie_table(self, table) -> list[GoalieStart]:
+        """Parse goalies from a table structure."""
+        goalies = []
+        rows = table.find_all("tr")
+
+        for row in rows:
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 2:
+                continue
+
+            team_code = None
+            goalie_name = None
+            record = None
+            gaa = None
+            save_pct = None
+
+            for cell in cells:
+                # Skip header cells
+                if cell.name == "th":
+                    continue
+
+                # Look for team in images
+                img = cell.find("img", alt=True)
+                if img and not team_code:
+                    team_code = normalize_team_name_safe(img.get("alt", ""), log_warning=False)
+
+                # Look for player links
+                link = cell.find("a", href=lambda x: x and "player" in str(x).lower())
+                if link and not goalie_name:
+                    name = link.get_text(strip=True)
+                    if self._looks_like_goalie_name(name):
+                        goalie_name = name
+
+                # Extract text for stats
+                text = cell.get_text(strip=True)
+
+                # Skip stat labels
+                if text in ["W-L-OTL:", "GAA:", "SV%:", "SO:"]:
+                    continue
+
+                # Parse stats values
+                if re.match(r"^\d+-\d+-\d+$", text):
+                    record = text
+                elif re.match(r"^\d\.\d+$", text):
+                    val = float(text)
+                    if val < 1:
+                        save_pct = val
+                    elif val < 5:
+                        gaa = val
+                elif re.match(r"^0\.\d+$", text):
+                    save_pct = float(text)
+
+            if team_code and goalie_name:
+                status = self._determine_status_from_context(row)
+                goalies.append(GoalieStart(
+                    team=team_code,
+                    goalie_name=goalie_name,
+                    opponent="",
+                    confirmation_status=status,
+                    game_time=None,
+                    record=record,
+                    gaa=gaa,
+                    save_pct=save_pct,
+                ))
+
+        return goalies
+
+    def _looks_like_goalie_name(self, text: str) -> bool:
+        """Check if text looks like a player name."""
+        if not text or len(text) < 3:
+            return False
+
+        # Skip stat labels and values
+        if text in ["W-L-OTL:", "GAA:", "SV%:", "SO:", "Confirmed", "Expected", "Likely"]:
+            return False
+        if re.match(r"^\d", text):  # Starts with number
+            return False
+        if re.match(r"^0?\.\d+$", text):  # Save percentage
+            return False
+
+        # Name pattern: First Last, First M. Last, J. Last, etc.
+        name_patterns = [
+            r"^[A-Z][a-z]+\s+[A-Z][a-z'-]+$",  # John Smith
+            r"^[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z'-]+$",  # John A. Smith
+            r"^[A-Z]\.\s*[A-Z][a-z'-]+$",  # J. Smith
+            r"^[A-Z][a-z]+-[A-Z][a-z]+\s+[A-Z][a-z'-]+$",  # Jean-Claude Smith
+        ]
+
+        for pattern in name_patterns:
+            if re.match(pattern, text):
+                return True
+
+        return False
+
+    def _determine_status_from_context(self, element) -> str:
+        """Determine goalie confirmation status from context."""
+        # Get all text from element and parents
+        context_text = ""
+
+        # Check element itself
+        if hasattr(element, "get_text"):
+            context_text = element.get_text(strip=True).lower()
+
+        # Check CSS classes
+        classes = ""
+        if hasattr(element, "get"):
+            classes = " ".join(element.get("class", [])).lower()
+
+        # Check parent classes too
+        parent = element.parent if hasattr(element, "parent") else None
+        if parent and hasattr(parent, "get"):
+            classes += " " + " ".join(parent.get("class", [])).lower()
+
+        # Determine status
+        if "confirmed" in context_text or "confirmed" in classes:
+            return "confirmed"
+        elif "expected" in context_text or "expected" in classes:
+            return "expected"
+        elif "likely" in context_text or "likely" in classes:
+            return "expected"
+        elif "unconfirmed" in context_text or "unconfirmed" in classes:
+            return "unconfirmed"
+
+        # Check for checkmark or green indicators
+        if "✓" in context_text or "check" in classes or "green" in classes:
+            return "confirmed"
+
+        # Default to expected (most goalies listed are expected to start)
+        return "expected"
+
+    def _extract_goalie_stats(self, element) -> tuple:
+        """Extract goalie stats (record, GAA, SV%) from element."""
+        record = None
+        gaa = None
+        save_pct = None
+
+        text = element.get_text(strip=True) if hasattr(element, "get_text") else ""
+
+        # Look for record pattern (W-L-OTL)
+        record_match = re.search(r"(\d+-\d+-\d+)", text)
+        if record_match:
+            record = record_match.group(1)
+
+        # Look for GAA (usually 2.XX or 3.XX)
+        gaa_match = re.search(r"(\d\.\d{2})\s*(?:GAA)?", text)
+        if gaa_match:
+            val = float(gaa_match.group(1))
+            if 1.5 < val < 5.0:  # Reasonable GAA range
+                gaa = val
+
+        # Look for SV% (usually .9XX)
+        sv_match = re.search(r"(0?\.\d{3})\s*(?:SV%)?", text)
+        if sv_match:
+            val = float(sv_match.group(1))
+            if 0.85 < val < 0.98:  # Reasonable SV% range
+                save_pct = val
+
+        return record, gaa, save_pct
 
     def _save_goalies_to_db(self, goalies: list[GoalieStart]) -> None:
         """Save goalie starts to database."""
