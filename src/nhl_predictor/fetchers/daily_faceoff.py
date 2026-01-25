@@ -112,11 +112,16 @@ class DailyFaceoffScraper(BaseFetcher):
     def _parse_starting_goalies(self, html: str) -> list[GoalieStart]:
         """Parse starting goalies from HTML."""
         goalies = []
+
+        # Strategy 1: Extract JSON data from script tags or data attributes
+        # The page uses React/JSON props for goalie data
+        json_goalies = self._extract_json_goalies(html)
+        if json_goalies:
+            return json_goalies
+
         soup = BeautifulSoup(html, "lxml")
 
-        # Try multiple parsing strategies
-
-        # Strategy 1: Look for matchup containers with team logos/names
+        # Strategy 2: Look for matchup containers with team logos/names
         matchups = soup.select(".starting-goalies-matchup, .matchup, [class*='matchup']")
         if matchups:
             for matchup in matchups:
@@ -125,7 +130,7 @@ class DailyFaceoffScraper(BaseFetcher):
             if goalies:
                 return goalies
 
-        # Strategy 2: Look for individual goalie cards
+        # Strategy 3: Look for individual goalie cards
         goalie_cards = soup.select(".goalie-card, .starter-card, [class*='goalie']")
         if goalie_cards:
             for card in goalie_cards:
@@ -135,13 +140,11 @@ class DailyFaceoffScraper(BaseFetcher):
             if goalies:
                 return goalies
 
-        # Strategy 3: Parse from divs that contain team images and player links
-        # Daily Faceoff often has team logos as images with alt text
+        # Strategy 4: Parse from divs that contain team images and player links
         team_sections = soup.find_all("div", recursive=True)
         current_team = None
 
         for div in team_sections:
-            # Look for team logo images
             img = div.find("img", alt=True)
             if img:
                 alt_text = img.get("alt", "")
@@ -149,15 +152,12 @@ class DailyFaceoffScraper(BaseFetcher):
                 if team_code:
                     current_team = team_code
 
-            # Look for player name links near team
             if current_team:
                 links = div.find_all("a", href=lambda x: x and "players" in x)
                 for link in links:
                     name = link.get_text(strip=True)
                     if self._looks_like_goalie_name(name):
-                        # Check confirmation status
                         status = self._determine_status_from_context(div)
-
                         goalie = GoalieStart(
                             team=current_team,
                             goalie_name=name,
@@ -168,18 +168,199 @@ class DailyFaceoffScraper(BaseFetcher):
                             gaa=None,
                             save_pct=None,
                         )
-
-                        # Avoid duplicates
                         if not any(g.team == current_team and g.goalie_name == name for g in goalies):
                             goalies.append(goalie)
                             logger.debug(f"Found goalie: {name} for {current_team} ({status})")
 
-        # Strategy 4: Table-based parsing
+        # Strategy 5: Table-based parsing
         if not goalies:
             tables = soup.find_all("table")
             for table in tables:
                 table_goalies = self._parse_goalie_table(table)
                 goalies.extend(table_goalies)
+
+        return goalies
+
+    def _extract_json_goalies(self, html: str) -> list[GoalieStart]:
+        """Extract goalie data from JSON embedded in the page."""
+        import json
+
+        goalies = []
+
+        # Look for JSON data in script tags or inline
+        # Common patterns: __NEXT_DATA__, props, window.__data, etc.
+        json_patterns = [
+            r'__NEXT_DATA__["\s]*[>=:]\s*(\{.+?\})\s*</script>',
+            r'window\.__INITIAL_STATE__\s*=\s*(\{.+?\});',
+            r'window\.__data\s*=\s*(\{.+?\});',
+            r'"props"\s*:\s*(\{.+?\})\s*,\s*"page"',
+            r'data-props=["\'](\{.+?\})["\']',
+        ]
+
+        for pattern in json_patterns:
+            matches = re.findall(pattern, html, re.DOTALL)
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    extracted = self._extract_goalies_from_json(data)
+                    goalies.extend(extracted)
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.debug(f"Failed to parse JSON: {e}")
+
+        # Also look for specific goalie-related JSON structures
+        # Pattern for matchup data with team/goalie info
+        matchup_patterns = [
+            r'"(away|home)TeamName"\s*:\s*"([^"]+)"',
+            r'"(away|home)GoalieSlug"\s*:\s*"[^"]*-([^"]+)"',
+            r'"(away|home)NewsStrengthName"\s*:\s*"([^"]+)"',
+        ]
+
+        # Extract team names
+        team_matches = re.findall(r'"(away|home)TeamName"\s*:\s*"([^"]+)"', html)
+        goalie_matches = re.findall(r'"(away|home)Goalie(?:Name)?"\s*:\s*"([^"]+)"', html)
+        status_matches = re.findall(r'"(away|home)NewsStrengthName"\s*:\s*"([^"]+)"', html)
+
+        # Build a mapping
+        matchup_data = {}
+        for side, team_name in team_matches:
+            key = f"{side}_team"
+            if key not in matchup_data:
+                matchup_data[key] = []
+            matchup_data[key].append(team_name)
+
+        for side, goalie_name in goalie_matches:
+            key = f"{side}_goalie"
+            if key not in matchup_data:
+                matchup_data[key] = []
+            matchup_data[key].append(goalie_name)
+
+        for side, status in status_matches:
+            key = f"{side}_status"
+            if key not in matchup_data:
+                matchup_data[key] = []
+            matchup_data[key].append(status)
+
+        # Process home goalies
+        home_teams = matchup_data.get("home_team", [])
+        home_goalies = matchup_data.get("home_goalie", [])
+        home_statuses = matchup_data.get("home_status", [])
+        away_teams = matchup_data.get("away_team", [])
+
+        for i, (team_name, goalie_name) in enumerate(zip(home_teams, home_goalies)):
+            team_code = normalize_team_name_safe(team_name, log_warning=False)
+            if team_code and goalie_name:
+                status = "expected"
+                if i < len(home_statuses):
+                    status_text = home_statuses[i].lower()
+                    if "confirmed" in status_text:
+                        status = "confirmed"
+                    elif "expected" in status_text or "likely" in status_text:
+                        status = "expected"
+
+                opponent = ""
+                if i < len(away_teams):
+                    opponent = normalize_team_name_safe(away_teams[i], log_warning=False) or ""
+
+                goalies.append(GoalieStart(
+                    team=team_code,
+                    goalie_name=goalie_name,
+                    opponent=opponent,
+                    confirmation_status=status,
+                    game_time=None,
+                    record=None,
+                    gaa=None,
+                    save_pct=None,
+                ))
+                logger.debug(f"Extracted home goalie: {goalie_name} for {team_code} ({status})")
+
+        # Process away goalies
+        away_goalies = matchup_data.get("away_goalie", [])
+        away_statuses = matchup_data.get("away_status", [])
+
+        for i, (team_name, goalie_name) in enumerate(zip(away_teams, away_goalies)):
+            team_code = normalize_team_name_safe(team_name, log_warning=False)
+            if team_code and goalie_name:
+                status = "expected"
+                if i < len(away_statuses):
+                    status_text = away_statuses[i].lower()
+                    if "confirmed" in status_text:
+                        status = "confirmed"
+                    elif "expected" in status_text or "likely" in status_text:
+                        status = "expected"
+
+                opponent = ""
+                if i < len(home_teams):
+                    opponent = normalize_team_name_safe(home_teams[i], log_warning=False) or ""
+
+                goalies.append(GoalieStart(
+                    team=team_code,
+                    goalie_name=goalie_name,
+                    opponent=opponent,
+                    confirmation_status=status,
+                    game_time=None,
+                    record=None,
+                    gaa=None,
+                    save_pct=None,
+                ))
+                logger.debug(f"Extracted away goalie: {goalie_name} for {team_code} ({status})")
+
+        return goalies
+
+    def _extract_goalies_from_json(self, data: dict, goalies: list = None) -> list[GoalieStart]:
+        """Recursively extract goalie info from JSON structure."""
+        if goalies is None:
+            goalies = []
+
+        if isinstance(data, dict):
+            # Check if this dict has goalie info
+            home_team = data.get("homeTeamName") or data.get("home_team_name")
+            away_team = data.get("awayTeamName") or data.get("away_team_name")
+            home_goalie = data.get("homeGoalie") or data.get("home_goalie") or data.get("homeGoalieName")
+            away_goalie = data.get("awayGoalie") or data.get("away_goalie") or data.get("awayGoalieName")
+            home_status = data.get("homeNewsStrengthName") or data.get("home_status") or ""
+            away_status = data.get("awayNewsStrengthName") or data.get("away_status") or ""
+
+            if home_team and home_goalie:
+                team_code = normalize_team_name_safe(home_team, log_warning=False)
+                if team_code:
+                    status = "confirmed" if "confirmed" in home_status.lower() else "expected"
+                    opponent = normalize_team_name_safe(away_team, log_warning=False) if away_team else ""
+                    goalies.append(GoalieStart(
+                        team=team_code,
+                        goalie_name=home_goalie,
+                        opponent=opponent or "",
+                        confirmation_status=status,
+                        game_time=None,
+                        record=None,
+                        gaa=None,
+                        save_pct=None,
+                    ))
+
+            if away_team and away_goalie:
+                team_code = normalize_team_name_safe(away_team, log_warning=False)
+                if team_code:
+                    status = "confirmed" if "confirmed" in away_status.lower() else "expected"
+                    opponent = normalize_team_name_safe(home_team, log_warning=False) if home_team else ""
+                    goalies.append(GoalieStart(
+                        team=team_code,
+                        goalie_name=away_goalie,
+                        opponent=opponent or "",
+                        confirmation_status=status,
+                        game_time=None,
+                        record=None,
+                        gaa=None,
+                        save_pct=None,
+                    ))
+
+            # Recurse into nested dicts/lists
+            for value in data.values():
+                if isinstance(value, (dict, list)):
+                    self._extract_goalies_from_json(value, goalies)
+
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, (dict, list)):
+                    self._extract_goalies_from_json(item, goalies)
 
         return goalies
 
