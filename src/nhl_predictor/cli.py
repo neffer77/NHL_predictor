@@ -231,7 +231,7 @@ class CLI:
         print("This may take a while...")
 
         try:
-            from .testing.backtest import run_backtest
+            from .infrastructure.backtest import run_backtest
 
             results = run_backtest(start_date, end_date)
 
