@@ -120,10 +120,26 @@ class NHLAPIFetcher(BaseFetcher):
             game_weeks = data.get("gameWeek", [])
 
             for week in game_weeks:
-                for game_data in week.get("games", []) if isinstance(week, dict) else []:
-                    game = self._parse_game(game_data)
-                    # Only include games for the requested date
-                    if game and game.date == game_date:
+                if not isinstance(week, dict):
+                    continue
+
+                # Get the actual game date from the week structure
+                week_date_str = week.get("date", "")
+                week_date = None
+                if week_date_str:
+                    try:
+                        week_date = datetime.strptime(week_date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        pass
+
+                # Only process games from the requested date
+                if week_date != game_date:
+                    continue
+
+                for game_data in week.get("games", []):
+                    # Pass the week date to avoid UTC timezone issues
+                    game = self._parse_game(game_data, override_date=week_date)
+                    if game:
                         games.append(game)
 
             # Also check direct games array (different API response format)
@@ -250,8 +266,14 @@ class NHLAPIFetcher(BaseFetcher):
             logger.error(f"Failed to fetch standings: {e}")
             raise
 
-    def _parse_game(self, game_data: dict) -> Optional[GameInfo]:
-        """Parse a game from API response."""
+    def _parse_game(self, game_data: dict, override_date: Optional[date] = None) -> Optional[GameInfo]:
+        """Parse a game from API response.
+
+        Args:
+            game_data: The game data dict from API.
+            override_date: If provided, use this date instead of parsing from API
+                          (handles UTC timezone issues).
+        """
         try:
             # Extract team info
             home_team_data = game_data.get("homeTeam", {})
@@ -272,20 +294,20 @@ class NHLAPIFetcher(BaseFetcher):
             game_date_str = game_data.get("gameDate", "")
             start_time_str = game_data.get("startTimeUTC", "")
 
-            game_date = None
+            game_date = override_date  # Use override if provided
             start_time = None
 
-            # Try to parse start time first
+            # Try to parse start time
             if start_time_str:
                 try:
                     start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-                    # Extract date from start time if gameDate is not available
-                    if not game_date_str:
+                    # Only extract date from start time if no override and no gameDate
+                    if not game_date and not game_date_str:
                         game_date = start_time.date()
                 except ValueError:
                     pass
 
-            # Parse gameDate if available
+            # Parse gameDate if available and no override
             if game_date_str and not game_date:
                 try:
                     game_date = datetime.strptime(game_date_str, "%Y-%m-%d").date()
