@@ -100,7 +100,7 @@ class NHLAPIFetcher(BaseFetcher):
             save_to_db: Whether to save games to database.
 
         Returns:
-            List of GameInfo objects.
+            List of GameInfo objects for the specified date only.
         """
         if game_date is None:
             game_date = date.today()
@@ -116,20 +116,22 @@ class NHLAPIFetcher(BaseFetcher):
             response = self.fetch_url(url)
             data = response.json()
 
-            # Parse game weeks structure
+            # Parse game weeks structure (API returns full week)
             game_weeks = data.get("gameWeek", [])
 
             for week in game_weeks:
-                for day in week.get("games", []) if isinstance(week, dict) else []:
-                    game = self._parse_game(day)
-                    if game:
+                for game_data in week.get("games", []) if isinstance(week, dict) else []:
+                    game = self._parse_game(game_data)
+                    # Only include games for the requested date
+                    if game and game.date == game_date:
                         games.append(game)
 
             # Also check direct games array (different API response format)
             if not games and "games" in data:
                 for game_data in data["games"]:
                     game = self._parse_game(game_data)
-                    if game:
+                    # Only include games for the requested date
+                    if game and game.date == game_date:
                         games.append(game)
 
             duration = (datetime.now() - start_time).total_seconds()

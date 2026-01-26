@@ -169,6 +169,7 @@ class StayAwayFilter:
                 GoalieStats.is_starter == True,
             ).first()
 
+            # Check if goalies are confirmed or at least expected
             home_confirmed = (
                 home_goalie and
                 home_goalie.confirmation_status == "confirmed"
@@ -177,20 +178,33 @@ class StayAwayFilter:
                 away_goalie and
                 away_goalie.confirmation_status == "confirmed"
             )
+            # Also accept "expected" as valid (just not as confident)
+            home_has_goalie = (
+                home_goalie and
+                home_goalie.confirmation_status in ("confirmed", "expected")
+            )
+            away_has_goalie = (
+                away_goalie and
+                away_goalie.confirmation_status in ("confirmed", "expected")
+            )
 
-            # Both unconfirmed = filter out
-            if not home_confirmed and not away_confirmed:
+            # Filter out only if BOTH teams have no goalie info at all
+            if not home_has_goalie and not away_has_goalie:
                 return {
                     "filter": True,
-                    "reason": "Both goalies unconfirmed",
-                    "flags": ["UNCONFIRMED_GOALIES"],
+                    "reason": "No goalie information available for either team",
+                    "flags": ["NO_GOALIE_INFO"],
                 }
 
-            # One unconfirmed = add flag but don't filter
-            if not home_confirmed:
-                flags.append("HOME_GOALIE_UNCONFIRMED")
-            if not away_confirmed:
-                flags.append("AWAY_GOALIE_UNCONFIRMED")
+            # Add flags for unconfirmed goalies (but don't filter)
+            if not home_has_goalie:
+                flags.append("HOME_GOALIE_MISSING")
+            elif not home_confirmed:
+                flags.append("HOME_GOALIE_EXPECTED")
+            if not away_has_goalie:
+                flags.append("AWAY_GOALIE_MISSING")
+            elif not away_confirmed:
+                flags.append("AWAY_GOALIE_EXPECTED")
 
             return {"filter": False, "flags": flags}
 
@@ -381,14 +395,16 @@ class StayAwayFilter:
     def _assess_risk_level(self, flags: list) -> str:
         """Assess overall risk level from flags."""
         high_risk_flags = [
-            "UNCONFIRMED_GOALIES",
+            "NO_GOALIE_INFO",
             "EXTREME_FATIGUE_DIFF",
+            "HOME_GOALIE_MISSING",
+            "AWAY_GOALIE_MISSING",
         ]
 
         medium_risk_flags = [
             "SCHEDULED_LOSS",
-            "HOME_GOALIE_UNCONFIRMED",
-            "AWAY_GOALIE_UNCONFIRMED",
+            "HOME_GOALIE_EXPECTED",
+            "AWAY_GOALIE_EXPECTED",
         ]
 
         for flag in flags:
