@@ -213,22 +213,27 @@ class NHLAPIFetcher(BaseFetcher):
         save_to_db: bool = True,
     ) -> list[TeamStanding]:
         """
-        Fetch current NHL standings.
+        Fetch NHL standings for a specific date.
 
         Args:
-            standings_date: Date for standings (defaults to now).
+            standings_date: Date for standings (defaults to today).
             save_to_db: Whether to save to database.
 
         Returns:
             List of TeamStanding objects.
         """
-        url = f"{self.BASE_URL}/standings/now"
+        if standings_date is None:
+            standings_date = date.today()
+
+        # Use date-specific endpoint for historical data
+        date_str = standings_date.strftime("%Y-%m-%d")
+        url = f"{self.BASE_URL}/standings/{date_str}"
 
         start_time = datetime.now()
         standings = []
 
         try:
-            logger.info("Fetching NHL standings")
+            logger.info(f"Fetching NHL standings for {date_str}")
             response = self.fetch_url(url)
             data = response.json()
 
@@ -243,7 +248,7 @@ class NHLAPIFetcher(BaseFetcher):
             duration = (datetime.now() - start_time).total_seconds()
 
             if save_to_db and standings:
-                self._save_standings_to_db(standings, standings_date or date.today())
+                self._save_standings_to_db(standings, standings_date)
 
             self.log_fetch(
                 fetch_type="standings",
@@ -252,7 +257,7 @@ class NHLAPIFetcher(BaseFetcher):
                 duration_seconds=duration,
             )
 
-            logger.info(f"Fetched standings for {len(standings)} teams")
+            logger.info(f"Fetched standings for {len(standings)} teams as of {date_str}")
             return standings
 
         except Exception as e:
@@ -265,6 +270,39 @@ class NHLAPIFetcher(BaseFetcher):
             )
             logger.error(f"Failed to fetch standings: {e}")
             raise
+
+    def fetch_standings_range(
+        self,
+        start_date: date,
+        end_date: date,
+        save_to_db: bool = True,
+    ) -> dict[date, list[TeamStanding]]:
+        """
+        Fetch standings for a date range (for backtesting).
+
+        Args:
+            start_date: Start date.
+            end_date: End date.
+            save_to_db: Whether to save to database.
+
+        Returns:
+            Dict mapping dates to standings.
+        """
+        all_standings = {}
+        current_date = start_date
+
+        while current_date <= end_date:
+            try:
+                standings = self.fetch_standings(current_date, save_to_db=save_to_db)
+                if standings:
+                    all_standings[current_date] = standings
+                    logger.debug(f"Fetched standings for {current_date}: {len(standings)} teams")
+            except Exception as e:
+                logger.warning(f"Failed to fetch standings for {current_date}: {e}")
+
+            current_date += timedelta(days=1)
+
+        return all_standings
 
     def _parse_game(self, game_data: dict, override_date: Optional[date] = None) -> Optional[GameInfo]:
         """Parse a game from API response.
@@ -467,6 +505,22 @@ class NHLAPIFetcher(BaseFetcher):
         db = get_db()
         with db.session_scope() as session:
             for standing in standings:
+                # Calculate xGF% proxy from goals for/against
+                # This gives us a reasonable approximation for backtesting
+                total_goals = standing.goals_for + standing.goals_against
+                if total_goals > 0:
+                    gf_pct = (standing.goals_for / total_goals) * 100
+                    # Scale to typical xGF% range (45-55)
+                    # NHL average is 50%, good teams ~52-54%, bad teams ~46-48%
+                    xgf_pct_approx = 45 + (gf_pct - 45) * 1.0  # Keep in similar range
+                    xgf_pct_approx = max(45.0, min(55.0, xgf_pct_approx))
+                else:
+                    xgf_pct_approx = 50.0
+
+                # Calculate points percentage as another strength indicator
+                max_points = standing.games_played * 2 if standing.games_played > 0 else 1
+                points_pct = standing.points / max_points if max_points > 0 else 0.5
+
                 # Check for existing record
                 existing = session.query(TeamDailyStats).filter(
                     TeamDailyStats.date == standings_date,
@@ -481,6 +535,11 @@ class NHLAPIFetcher(BaseFetcher):
                     existing.losses = standing.losses
                     existing.ot_losses = standing.ot_losses
                     existing.points = standing.points
+                    existing.xgf_pct = xgf_pct_approx
+                    existing.xgf = standing.goals_for
+                    existing.xga = standing.goals_against
+                    # Use goal differential as a proxy for HDCF differential
+                    existing.hdcf_pct = xgf_pct_approx  # Similar proxy
                 else:
                     # Create new
                     stats = TeamDailyStats(
@@ -491,6 +550,10 @@ class NHLAPIFetcher(BaseFetcher):
                         losses=standing.losses,
                         ot_losses=standing.ot_losses,
                         points=standing.points,
+                        xgf_pct=xgf_pct_approx,
+                        xgf=standing.goals_for,
+                        xga=standing.goals_against,
+                        hdcf_pct=xgf_pct_approx,  # Use same proxy
                         source="nhl_api",
                     )
                     session.add(stats)

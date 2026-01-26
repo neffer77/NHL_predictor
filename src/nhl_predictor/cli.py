@@ -327,13 +327,15 @@ class CLI:
         self,
         start_date: date,
         end_date: date,
+        include_standings: bool = True,
     ) -> int:
         """
-        Fetch historical game data for backtesting.
+        Fetch historical game data and standings for backtesting.
 
         Args:
             start_date: Start date for history fetch.
             end_date: End date for history fetch.
+            include_standings: Also fetch standings data for each date.
 
         Returns:
             Exit code.
@@ -345,20 +347,32 @@ class CLI:
 
         nhl = NHLAPIFetcher()
         total_games = 0
+        total_standings = 0
         current_date = start_date
 
         while current_date <= end_date:
             try:
+                # Fetch games
                 games = nhl.fetch_schedule(current_date, save_to_db=True)
                 if games:
                     total_games += len(games)
-                    print(f"  {current_date}: {len(games)} games")
+
+                # Fetch standings (provides team stats for predictions)
+                if include_standings:
+                    standings = nhl.fetch_standings(current_date, save_to_db=True)
+                    if standings:
+                        total_standings += len(standings)
+
+                if games:
+                    print(f"  {current_date}: {len(games)} games, {len(standings) if include_standings else 0} team stats")
             except Exception as e:
                 logger.warning(f"Failed to fetch {current_date}: {e}")
 
             current_date += timedelta(days=1)
 
         print(f"\nFetched {total_games} total games.")
+        if include_standings:
+            print(f"Fetched standings for {total_standings // 32 if total_standings else 0} days ({total_standings} team records).")
         print("Historical data is now available for backtesting.")
         return 0
 

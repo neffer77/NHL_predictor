@@ -78,6 +78,16 @@ class XGAggregator:
                 TeamDailyStats.source == source,
             ).order_by(TeamDailyStats.date.desc()).first()
 
+            # Fallback to NHL API standings data if NST data not available
+            if not stats and source == "nst_5v5":
+                stats = session.query(TeamDailyStats).filter(
+                    TeamDailyStats.team == team,
+                    TeamDailyStats.date <= as_of_date,
+                    TeamDailyStats.source == "nhl_api",
+                ).order_by(TeamDailyStats.date.desc()).first()
+                if stats:
+                    source = "nhl_api"  # Update source for rolling calculations
+
             if not stats:
                 logger.warning(f"No xG data found for {team}")
                 return None
