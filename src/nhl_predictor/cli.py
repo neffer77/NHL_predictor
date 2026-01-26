@@ -8,7 +8,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -323,6 +323,45 @@ class CLI:
         print("\nData update complete!")
         return 0
 
+    def fetch_history(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> int:
+        """
+        Fetch historical game data for backtesting.
+
+        Args:
+            start_date: Start date for history fetch.
+            end_date: End date for history fetch.
+
+        Returns:
+            Exit code.
+        """
+        from datetime import timedelta
+        from .fetchers import NHLAPIFetcher
+
+        print(f"\nFetching historical data from {start_date} to {end_date}...")
+
+        nhl = NHLAPIFetcher()
+        total_games = 0
+        current_date = start_date
+
+        while current_date <= end_date:
+            try:
+                games = nhl.fetch_schedule(current_date, save_to_db=True)
+                if games:
+                    total_games += len(games)
+                    print(f"  {current_date}: {len(games)} games")
+            except Exception as e:
+                logger.warning(f"Failed to fetch {current_date}: {e}")
+
+            current_date += timedelta(days=1)
+
+        print(f"\nFetched {total_games} total games.")
+        print("Historical data is now available for backtesting.")
+        return 0
+
 
 def parse_date(date_str: str) -> date:
     """Parse date string in various formats."""
@@ -441,6 +480,23 @@ def main():
         help="Update data sources",
     )
 
+    # fetch-history
+    history_fetch_parser = subparsers.add_parser(
+        "fetch-history",
+        help="Fetch historical game data for backtesting",
+    )
+    history_fetch_parser.add_argument(
+        "start_date",
+        type=str,
+        help="Start date (YYYY-MM-DD)",
+    )
+    history_fetch_parser.add_argument(
+        "--end", "-e",
+        type=str,
+        default=None,
+        help="End date (YYYY-MM-DD, defaults to yesterday)",
+    )
+
     # Parse args
     args = parser.parse_args()
 
@@ -479,6 +535,15 @@ def main():
 
     elif args.command == "update":
         return cli.update_data()
+
+    elif args.command == "fetch-history":
+        try:
+            start = parse_date(args.start_date)
+            end = parse_date(args.end) if args.end else date.today() - timedelta(days=1)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+        return cli.fetch_history(start, end)
 
     return 0
 

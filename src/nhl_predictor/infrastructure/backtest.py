@@ -167,7 +167,11 @@ class Backtester:
         Run backtest for a single day.
 
         Uses only data available before game_date to prevent leakage.
+        For backtesting, we skip goalie filters since historical goalie data
+        is not available.
         """
+        from ..prediction.probability_engine import ProbabilityEngine
+
         with self.db.session_scope() as session:
             # Get games for this date
             games = session.query(Game).filter(
@@ -178,56 +182,88 @@ class Backtester:
             if not games:
                 return None
 
-            # Create point-in-time selector
-            selector = self._create_pit_selector(game_date)
+            # For backtesting, directly calculate probabilities without goalie filter
+            prob_engine = ProbabilityEngine()
+            game_predictions = []
 
-            # Generate picks using only historical data
-            try:
-                daily_picks = selector.select_daily_picks(
-                    game_date,
-                    pick_count=self.config.picks_per_day,
-                )
-            except Exception as e:
-                logger.warning(f"Error generating picks for {game_date}: {e}")
-                return None
+            for game in games:
+                try:
+                    prob = prob_engine.calculate_probability(
+                        game.home_team, game.away_team, game_date
+                    )
+                    if prob:
+                        # Determine pick (higher probability side)
+                        if prob.home_win_prob >= prob.away_win_prob:
+                            pick_team = game.home_team
+                            pick_prob = prob.home_win_prob
+                            pick_side = "home"
+                        else:
+                            pick_team = game.away_team
+                            pick_prob = prob.away_win_prob
+                            pick_side = "away"
+
+                        # Calculate edge (assume 50% market baseline for backtest)
+                        edge = pick_prob - 0.50
+
+                        # Only include if meets minimum thresholds
+                        if pick_prob >= self.config.min_confidence and edge >= self.config.min_edge:
+                            game_predictions.append({
+                                "game": game,
+                                "pick_team": pick_team,
+                                "pick_prob": pick_prob,
+                                "edge": edge,
+                                "pick_side": pick_side,
+                            })
+                except Exception as e:
+                    logger.debug(f"Error calculating probability for game {game.game_id}: {e}")
+                    continue
+
+            # Sort by edge and take top picks
+            game_predictions.sort(key=lambda x: x["edge"], reverse=True)
+            top_picks = game_predictions[:self.config.picks_per_day]
 
             # Convert to backtest picks and check results
             picks = []
             wins = 0
             losses = 0
 
-            for pick in daily_picks.picks:
-                # Find actual game result
-                game = next(
-                    (g for g in games if g.game_id == pick.game_id),
-                    None
-                )
+            for pred in top_picks:
+                game = pred["game"]
+                correct = pred["pick_team"] == game.winner
 
-                if game:
-                    correct = pick.pick_team == game.winner
+                if correct:
+                    wins += 1
+                else:
+                    losses += 1
 
-                    if correct:
-                        wins += 1
-                    else:
-                        losses += 1
+                # Determine tier based on edge
+                edge = pred["edge"]
+                if edge >= 0.08:
+                    tier = "LOCK"
+                elif edge >= 0.05:
+                    tier = "STRONG"
+                elif edge >= 0.02:
+                    tier = "STANDARD"
+                else:
+                    tier = "LEAN"
 
-                    picks.append(BacktestPick(
-                        date=game_date,
-                        game_id=pick.game_id,
-                        home_team=pick.home_team,
-                        away_team=pick.away_team,
-                        pick=pick.pick_team,
-                        model_probability=pick.model_probability,
-                        edge=pick.edge,
-                        tier=pick.tier,
-                        actual_winner=game.winner,
-                        correct=correct,
-                    ))
+                picks.append(BacktestPick(
+                    date=game_date,
+                    game_id=game.game_id,
+                    home_team=game.home_team,
+                    away_team=game.away_team,
+                    pick=pred["pick_team"],
+                    model_probability=pred["pick_prob"],
+                    edge=edge,
+                    tier=tier,
+                    actual_winner=game.winner,
+                    correct=correct,
+                ))
 
             return BacktestDay(
                 date=game_date,
                 games_available=len(games),
-                games_filtered=daily_picks.games_filtered,
+                games_filtered=len(games) - len(game_predictions),
                 picks_made=len(picks),
                 picks=picks,
                 wins=wins,
