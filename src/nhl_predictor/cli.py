@@ -74,6 +74,9 @@ class CLI:
         print(f"\nGenerating predictions for {game_date}...")
 
         try:
+            # Auto-fetch data if no games exist for this date
+            self._ensure_data_available(game_date)
+
             # Get picks
             daily_picks = self.selector.select_daily_picks(game_date)
 
@@ -114,6 +117,46 @@ class CLI:
             logger.error(f"Error generating predictions: {e}")
             print(f"\nError: {e}")
             return 1
+
+    def _ensure_data_available(self, game_date: date) -> None:
+        """
+        Auto-fetch schedule and standings if no data exists for the date.
+
+        This allows 'nhl-predict today' to work on a fresh install without
+        requiring the user to manually run fetch commands first.
+        """
+        from .models.schema import Game, TeamDailyStats
+
+        db = get_db()
+        with db.session_scope() as session:
+            games_exist = session.query(Game).filter(
+                Game.date == game_date
+            ).count() > 0
+
+            stats_exist = session.query(TeamDailyStats).filter(
+                TeamDailyStats.date <= game_date,
+            ).count() > 0
+
+        if not games_exist or not stats_exist:
+            from .fetchers import NHLAPIFetcher
+
+            nhl = NHLAPIFetcher()
+
+            if not games_exist:
+                print("  Fetching today's schedule from NHL API...")
+                try:
+                    games = nhl.fetch_schedule(game_date, save_to_db=True)
+                    print(f"  Found {len(games)} games.")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-fetch schedule: {e}")
+
+            if not stats_exist:
+                print("  Fetching current standings from NHL API...")
+                try:
+                    standings = nhl.fetch_standings(game_date, save_to_db=True)
+                    print(f"  Loaded stats for {len(standings)} teams.")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-fetch standings: {e}")
 
     def show_status(self) -> int:
         """

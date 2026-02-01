@@ -188,22 +188,20 @@ class StayAwayFilter:
                 away_goalie.confirmation_status in ("confirmed", "expected")
             )
 
-            # Filter out only if BOTH teams have no goalie info at all
+            # Never hard-filter on goalie data — just flag the risk.
+            # This allows predictions to run even on a fresh DB or when
+            # goalie data hasn't been scraped yet.
             if not home_has_goalie and not away_has_goalie:
-                return {
-                    "filter": True,
-                    "reason": "No goalie information available for either team",
-                    "flags": ["NO_GOALIE_INFO"],
-                }
-
-            # Add flags for unconfirmed goalies (but don't filter)
-            if not home_has_goalie:
+                flags.append("NO_GOALIE_INFO")
+            elif not home_has_goalie:
                 flags.append("HOME_GOALIE_MISSING")
             elif not home_confirmed:
                 flags.append("HOME_GOALIE_EXPECTED")
-            if not away_has_goalie:
+
+            if not away_has_goalie and home_has_goalie:
+                # Only add if we didn't already add NO_GOALIE_INFO
                 flags.append("AWAY_GOALIE_MISSING")
-            elif not away_confirmed:
+            elif away_has_goalie and not away_confirmed:
                 flags.append("AWAY_GOALIE_EXPECTED")
 
             return {"filter": False, "flags": flags}
