@@ -207,6 +207,40 @@ class NHLAPIFetcher(BaseFetcher):
 
         return all_games
 
+    def get_next_game_date(self, from_date: Optional[date] = None) -> Optional[date]:
+        """
+        Find the next date with NHL games, starting from a reference date.
+
+        Args:
+            from_date: Date to check from (defaults to today).
+
+        Returns:
+            The next date with games, or None if it cannot be determined.
+        """
+        if from_date is None:
+            from_date = date.today()
+
+        date_str = from_date.strftime("%Y-%m-%d")
+        url = f"{self.BASE_URL}/schedule/{date_str}"
+
+        try:
+            response = self.fetch_url(url)
+            data = response.json()
+
+            # If games exist on the reference date, return it.
+            if self._count_games_for_date(data, from_date) > 0:
+                return from_date
+
+            # NHL schedule payloads typically include the next date with games.
+            next_date = self._parse_iso_date(data.get("nextStartDate"))
+            if next_date and next_date >= from_date:
+                return next_date
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to determine next game date from {date_str}: {e}")
+            return None
+
     def fetch_standings(
         self,
         standings_date: Optional[date] = None,
@@ -387,6 +421,43 @@ class NHLAPIFetcher(BaseFetcher):
 
         except Exception as e:
             logger.warning(f"Failed to parse game: {e}")
+            return None
+
+    def _count_games_for_date(self, data: dict[str, Any], target_date: date) -> int:
+        """Count games for a target date across known NHL schedule payload formats."""
+        target_date_str = target_date.strftime("%Y-%m-%d")
+        total_games = 0
+
+        game_weeks = data.get("gameWeek", [])
+        for week in game_weeks:
+            if not isinstance(week, dict):
+                continue
+
+            if week.get("date") != target_date_str:
+                continue
+
+            week_games = week.get("games", [])
+            if isinstance(week_games, list):
+                total_games += len(week_games)
+
+        # Fallback for direct games array responses.
+        if total_games == 0 and isinstance(data.get("games"), list):
+            total_games = len([
+                g for g in data["games"]
+                if isinstance(g, dict) and g.get("gameDate") == target_date_str
+            ])
+
+        return total_games
+
+    @staticmethod
+    def _parse_iso_date(value: Any) -> Optional[date]:
+        """Parse YYYY-MM-DD date strings safely."""
+        if not isinstance(value, str) or not value:
+            return None
+
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
             return None
 
     def _parse_standing(self, team_data: dict) -> Optional[TeamStanding]:

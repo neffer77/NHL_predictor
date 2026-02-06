@@ -115,6 +115,43 @@ class TestNHLAPIFetcher:
 
         fetcher.close()
 
+    def test_get_next_game_date_returns_same_day_when_games_exist(self):
+        """If games exist on from_date, return from_date."""
+        fetcher = NHLAPIFetcher()
+        target_date = date(2026, 2, 6)
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "gameWeek": [
+                {"date": "2026-02-06", "games": [{"id": 1}]}
+            ]
+        }
+
+        with patch.object(fetcher, "fetch_url", return_value=mock_response):
+            next_game_date = fetcher.get_next_game_date(target_date)
+
+        assert next_game_date == target_date
+        fetcher.close()
+
+    def test_get_next_game_date_uses_next_start_date(self):
+        """If no games exist on from_date, use API-provided nextStartDate."""
+        fetcher = NHLAPIFetcher()
+        target_date = date(2026, 2, 6)
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "gameWeek": [
+                {"date": "2026-02-06", "games": []}
+            ],
+            "nextStartDate": "2026-02-25",
+        }
+
+        with patch.object(fetcher, "fetch_url", return_value=mock_response):
+            next_game_date = fetcher.get_next_game_date(target_date)
+
+        assert next_game_date == date(2026, 2, 25)
+        fetcher.close()
+
 
 class TestNSTScraper:
     """Tests for Natural Stat Trick scraper."""

@@ -80,6 +80,18 @@ class CLI:
             # Get picks
             daily_picks = self.selector.select_daily_picks(game_date)
 
+            if daily_picks.total_games == 0:
+                next_game_date = self._find_next_game_date(game_date)
+
+                if next_game_date and next_game_date > game_date:
+                    print(f"\nNo NHL games are scheduled for {game_date}.")
+                    print(f"Next NHL game date: {next_game_date}")
+                    print(f"Try: nhl-predict date {next_game_date}")
+                else:
+                    print(f"\nNo games found in local data for {game_date}.")
+                    print("If games should exist, run: nhl-predict update")
+                return 0
+
             if not daily_picks.picks:
                 print("\nNo picks meet minimum requirements for this date.")
                 print(f"Games analyzed: {daily_picks.total_games}")
@@ -143,7 +155,7 @@ class CLI:
             nhl = NHLAPIFetcher()
 
             if not games_exist:
-                print("  Fetching today's schedule from NHL API...")
+                print(f"  Fetching NHL schedule for {game_date}...")
                 try:
                     games = nhl.fetch_schedule(game_date, save_to_db=True)
                     print(f"  Found {len(games)} games.")
@@ -157,6 +169,17 @@ class CLI:
                     print(f"  Loaded stats for {len(standings)} teams.")
                 except Exception as e:
                     logger.warning(f"Failed to auto-fetch standings: {e}")
+
+    def _find_next_game_date(self, from_date: date) -> Optional[date]:
+        """Find the next NHL game date from a reference date."""
+        from .fetchers import NHLAPIFetcher
+
+        try:
+            with NHLAPIFetcher() as nhl:
+                return nhl.get_next_game_date(from_date)
+        except Exception as e:
+            logger.debug(f"Could not determine next game date from {from_date}: {e}")
+            return None
 
     def show_status(self) -> int:
         """
@@ -325,7 +348,15 @@ class CLI:
         print("  Fetching NHL schedule...")
         try:
             nhl = NHLAPIFetcher()
-            nhl.fetch_schedule(date.today())
+            today_date = date.today()
+            todays_games = nhl.fetch_schedule(today_date)
+
+            if not todays_games:
+                next_game_date = nhl.get_next_game_date(today_date)
+                if next_game_date and next_game_date > today_date:
+                    print(f"  No games on {today_date}. Fetching next slate ({next_game_date})...")
+                    upcoming_games = nhl.fetch_schedule(next_game_date)
+                    print(f"    Loaded {len(upcoming_games)} games for {next_game_date}")
         except Exception as e:
             errors.append(f"NHL schedule: {e}")
             logger.warning(f"Failed to fetch NHL schedule: {e}")
